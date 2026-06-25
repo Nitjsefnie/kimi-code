@@ -406,6 +406,7 @@ describe('SessionSubagentHost', () => {
       'Glob',
       'Grep',
       'Read',
+      'Whoami',
       'Write',
     ]);
     expect(child.llmCalls[0]?.history).toMatchObject([

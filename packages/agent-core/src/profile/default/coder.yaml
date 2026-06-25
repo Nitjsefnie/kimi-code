@@ -15,4 +15,5 @@ tools:
   - Edit
   - WebSearch
   - FetchURL
+  - Whoami
   - mcp__*
