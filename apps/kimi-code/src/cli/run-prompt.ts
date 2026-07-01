@@ -189,9 +189,17 @@ export async function runPrompt(
     // distinct exit code.
     const goalCreate = parseHeadlessGoalCreate(opts.prompt!);
     if (goalCreate !== undefined) {
-      await runHeadlessGoal(session, goalCreate, goalModel, outputFormat, stdout, stderr);
+      await runHeadlessGoal(
+        session,
+        goalCreate,
+        goalModel,
+        outputFormat,
+        opts.quiet === true,
+        stdout,
+        stderr,
+      );
     } else {
-      await runPromptTurn(session, opts.prompt!, outputFormat, stdout, stderr);
+      await runPromptTurn(session, opts.prompt!, outputFormat, opts.quiet === true, stdout, stderr);
     }
     writeResumeHint(session.id, outputFormat, stdout, stderr);
 
@@ -208,6 +216,7 @@ async function runHeadlessGoal(
   goal: HeadlessGoalCreate,
   model: string | undefined,
   outputFormat: PromptOutputFormat,
+  quiet: boolean,
   stdout: PromptOutput,
   stderr: PromptOutput,
 ): Promise<void> {
@@ -230,7 +239,7 @@ async function runHeadlessGoal(
   try {
     // The objective is sent as the normal prompt; goal continuation keeps the
     // turn alive until a terminal state is reached.
-    await runPromptTurn(session, goal.objective, outputFormat, stdout, stderr);
+    await runPromptTurn(session, goal.objective, outputFormat, quiet, stdout, stderr);
   } finally {
     unsubscribeGoalEvents();
     const snapshot = completedSnapshot ?? (await session.getGoal()).goal;
@@ -425,6 +434,7 @@ function runPromptTurn(
   session: Session,
   prompt: string,
   outputFormat: PromptOutputFormat,
+  quiet: boolean,
   stdout: PromptOutput,
   stderr: PromptOutput,
 ): Promise<void> {
@@ -433,7 +443,9 @@ function runPromptTurn(
   const outputWriter =
     outputFormat === 'stream-json'
       ? new PromptJsonWriter(stdout)
-      : new PromptTranscriptWriter(stdout, stderr);
+      : quiet
+        ? new PromptQuietWriter(stdout, stderr)
+        : new PromptTranscriptWriter(stdout, stderr);
   let settled = false;
   let unsubscribe: (() => void) | undefined;
 
@@ -600,6 +612,61 @@ class PromptTranscriptWriter implements PromptTurnWriter {
   finish(): void {
     this.thinkingWriter.finish();
     this.assistantWriter.finish();
+  }
+}
+
+/**
+ * Quiet mode (`kimi -p --quiet`): suppress the streamed transcript on stdout
+ * and print only the last assistant message, unformatted, once the turn ends.
+ * Thinking still streams to stderr so a watching operator sees progress while
+ * stdout stays clean for scripting.
+ */
+class PromptQuietWriter implements PromptTurnWriter {
+  private readonly thinkingWriter: PromptBlockWriter;
+  private assistantText = '';
+  private lastMessage = '';
+
+  constructor(
+    private readonly stdout: PromptOutput,
+    stderr: PromptOutput,
+  ) {
+    this.thinkingWriter = new PromptBlockWriter(stderr);
+  }
+
+  writeAssistantDelta(delta: string): void {
+    this.thinkingWriter.finish();
+    this.assistantText += delta;
+  }
+
+  writeHookResult(): void {}
+
+  writeThinkingDelta(delta: string): void {
+    this.thinkingWriter.write(delta);
+  }
+
+  writeToolCall(): void {}
+
+  writeToolCallDelta(): void {}
+
+  writeToolResult(): void {}
+
+  flushAssistant(): void {
+    if (this.assistantText.length === 0) return;
+    this.lastMessage = this.assistantText;
+    this.assistantText = '';
+  }
+
+  discardAssistant(): void {
+    this.assistantText = '';
+  }
+
+  finish(): void {
+    this.thinkingWriter.finish();
+    this.flushAssistant();
+    if (this.lastMessage.length === 0) return;
+    this.stdout.write(
+      this.lastMessage.endsWith('\n') ? this.lastMessage : `${this.lastMessage}\n`,
+    );
   }
 }
 
