@@ -147,6 +147,7 @@ function defaultOpts(): CLIOptions {
     plan: false,
     model: undefined,
     outputFormat: undefined,
+    quiet: false,
     prompt: undefined,
     skillsDirs: [],
   };
