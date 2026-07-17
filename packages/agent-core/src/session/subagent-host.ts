@@ -111,6 +111,12 @@ export interface RunSubagentOptions {
   readonly parentToolCallUuid?: string;
   readonly prompt: string;
   readonly description: string;
+  /**
+   * Optional model alias override for this run. Validated against the parent
+   * agent's configured model catalog; when omitted the child runs on the
+   * parent agent's current model.
+   */
+  readonly modelAlias?: string;
   readonly swarmIndex?: number;
   readonly runInBackground: boolean;
   readonly signal: AbortSignal;
@@ -154,6 +160,9 @@ export class SessionSubagentHost {
 
     const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
     const profile = this.resolveProfile(parent, options.profileName);
+    // Resolve (and validate) the child model before allocating the child
+    // agent, so an unknown alias fails the launch without leaving an orphan.
+    const modelAlias = this.resolveChildModelAlias(parent, options.modelAlias);
     const { id, agent } = await this.session.createAgent(
       { type: 'sub', generate: parent.rawGenerate },
       { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
@@ -161,7 +170,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
-        await this.configureChild(parent, agent, profile);
+        await this.configureChild(parent, agent, profile, modelAlias);
         return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
@@ -179,10 +188,11 @@ export class SessionSubagentHost {
   async resume(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
+    const modelAlias = this.resolveChildModelAlias(parent, options.modelAlias);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
-        child.config.update({ modelAlias: parent.config.modelAlias });
+        child.config.update({ modelAlias });
         return await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, agentId, runOptions, error);
@@ -195,10 +205,11 @@ export class SessionSubagentHost {
   async retry(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
+    const modelAlias = this.resolveChildModelAlias(parent, options.modelAlias);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       try {
         runOptions.signal.throwIfAborted();
-        child.config.update({ modelAlias: parent.config.modelAlias });
+        child.config.update({ modelAlias });
         this.emitSubagentStarted(parent, agentId);
         const turnId = child.turn.retry('agent-host');
         if (turnId === null) {
@@ -307,6 +318,32 @@ export class SessionSubagentHost {
     return metadata.swarmItem;
   }
 
+  /**
+   * Resolve the model alias a child run should use. An explicit request is
+   * validated against the parent agent's configured model catalog (the same
+   * alias set `/model` switches between) so a typo fails the launch with the
+   * valid options instead of producing a broken child; no request means the
+   * child inherits the parent agent's current model.
+   */
+  private resolveChildModelAlias(
+    parent: Agent,
+    requested: string | undefined,
+  ): string | undefined {
+    if (requested === undefined || requested.length === 0) {
+      return parent.config.modelAlias;
+    }
+    const models = parent.kimiConfig?.models ?? {};
+    if (models[requested] === undefined) {
+      const known = Object.keys(models);
+      throw new Error(
+        known.length === 0
+          ? `Unknown model alias "${requested}": no model catalog is configured, so the model cannot be overridden`
+          : `Unknown model alias "${requested}". Available models: ${known.join(', ')}`,
+      );
+    }
+    return requested;
+  }
+
   private resolveProfile(parent: Agent, profileName: string): ResolvedAgentProfile {
     const profile =
       DEFAULT_AGENT_PROFILES[parent.config.profileName ?? 'agent']?.subagents?.[profileName] ??
@@ -400,11 +437,13 @@ export class SessionSubagentHost {
     parent: Agent,
     child: Agent,
     profile: ResolvedAgentProfile,
+    modelAlias: string | undefined,
   ): Promise<void> {
-    // A subagent always inherits the parent agent's model.
+    // A subagent inherits the parent agent's model unless the dispatch
+    // overrides it with another configured alias (resolveChildModelAlias).
     child.config.update({
       cwd: parent.config.cwd,
-      modelAlias: parent.config.modelAlias,
+      modelAlias,
       thinkingEffort: parent.config.thinkingEffort,
     });
 

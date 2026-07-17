@@ -136,12 +136,37 @@ describe('AgentTool', () => {
     expect(tool.description).toContain('Default to a foreground subagent');
   });
 
-  it('does not expose a model parameter in the JSON schema', () => {
+  it('exposes a model parameter that documents inherit-by-default', () => {
     const host = mockSubagentHost({ spawn: vi.fn() });
     const tool = agentTool(host);
-    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
+    const properties = (
+      tool.parameters as { properties: Record<string, { description?: string }> }
+    ).properties;
 
-    expect(properties).not.toHaveProperty('model');
+    const modelDescription = properties['model']?.description ?? '';
+    // The default is the calling agent's model — not a fixed alias.
+    expect(modelDescription).toContain('calling agent');
+    // Points the model at the dynamic alias listing in the tool description.
+    expect(modelDescription).toContain('Available models');
+  });
+
+  it('lists the configured model aliases in the tool description', () => {
+    const host = mockSubagentHost({ spawn: vi.fn() });
+    const tool = agentTool(host, createBackgroundManager().manager, undefined, {
+      models: ['kimi-for-coding', 'k2-thinking'],
+    });
+
+    expect(tool.description).toContain(
+      'Available models (pass via model): kimi-for-coding, k2-thinking',
+    );
+    expect(tool.description).toContain('same model as the calling agent');
+  });
+
+  it('omits the model listing when no model catalog is available', () => {
+    const host = mockSubagentHost({ spawn: vi.fn() });
+    const tool = agentTool(host);
+
+    expect(tool.description).not.toContain('Available models');
   });
 
   it('renders the tool set for each subagent type', () => {
@@ -249,6 +274,85 @@ describe('AgentTool', () => {
     expect(result.output).toContain('agent_id: agent-child');
     expect(result.output).toContain('actual_subagent_type: explore');
     expect(result.output).toContain('child result');
+  });
+
+  it('forwards the model override to the subagent host on spawn', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockResolvedValue({
+        agentId: 'agent-child',
+        profileName: 'coder',
+        resumed: false,
+        completion: Promise.resolve({ result: 'child result' }),
+      }),
+    });
+    const tool = agentTool(host);
+
+    await executeTool(tool,
+      context({
+        prompt: 'Investigate',
+        description: 'Find cause',
+        model: 'k2-thinking',
+      }),
+    );
+
+    expect(host.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'coder',
+        modelAlias: 'k2-thinking',
+      }),
+    );
+  });
+
+  it('spawns without a model override by default so the host inherits the parent model', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockResolvedValue({
+        agentId: 'agent-child',
+        profileName: 'coder',
+        resumed: false,
+        completion: Promise.resolve({ result: 'child result' }),
+      }),
+    });
+    const tool = agentTool(host);
+
+    await executeTool(tool,
+      context({
+        prompt: 'Investigate',
+        description: 'Find cause',
+        model: '',
+      }),
+    );
+
+    expect(host.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ modelAlias: undefined }),
+    );
+  });
+
+  it('forwards the model override when resuming a subagent', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      resume: vi.fn().mockResolvedValue({
+        agentId: 'agent-existing',
+        profileName: 'explore',
+        resumed: true,
+        completion: Promise.resolve({ result: 'resumed result' }),
+      }),
+    });
+    const tool = agentTool(host);
+
+    await executeTool(tool,
+      context({
+        prompt: 'Continue',
+        description: 'Continue work',
+        resume: 'agent-existing',
+        model: 'k2-thinking',
+      }),
+    );
+
+    expect(host.spawn).not.toHaveBeenCalled();
+    expect(host.resume).toHaveBeenCalledWith(
+      'agent-existing',
+      expect.objectContaining({ modelAlias: 'k2-thinking' }),
+    );
   });
 
   it('falls back to coder for an empty subagent type', async () => {

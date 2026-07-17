@@ -72,6 +72,12 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'Optional agent ID to resume instead of creating a new instance. When set, do not also pass subagent_type — the resumed agent keeps its own type, and supplying both is rejected.',
       ),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        'Optional model alias to run the subagent on — one of the configured aliases (see "Available models" in this tool description). Defaults to the model of the calling agent when omitted. Applies to new and resumed subagents alike; an unknown alias rejects the launch.',
+      ),
     run_in_background: z
       .boolean()
       .optional()
@@ -116,6 +122,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       log?: Logger;
       allowBackground?: boolean | undefined;
       subagentTimeoutMs?: number | undefined;
+      models?: readonly string[] | undefined;
     },
   ) {
     const log = options?.log;
@@ -124,12 +131,21 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     // stays `0`, and the BackgroundManager arms no timer for it.
     this.subagentTimeoutMs = options?.subagentTimeoutMs;
     const typeLines = buildSubagentDescriptions(subagents);
-    const baseDescription = `${AGENT_DESCRIPTION_BASE}\n\n${
+    let description = `${AGENT_DESCRIPTION_BASE}\n\n${
       this.allowBackground ? AGENT_BACKGROUND_DESCRIPTION : AGENT_BACKGROUND_DISABLED_DESCRIPTION
     }`;
-    this.description = typeLines
-      ? `${baseDescription}\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`
-      : baseDescription;
+    if (typeLines) {
+      description += `\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`;
+    }
+    // Advisory listing only (no JSON-schema enum): the tool set is not
+    // re-registered on config reload, so a hard enum could go stale and block
+    // valid aliases. The authoritative validation happens at launch time in
+    // SessionSubagentHost against the live model catalog.
+    const models = options?.models ?? [];
+    if (models.length > 0) {
+      description += `\n\nAvailable models (pass via model): ${models.join(', ')}. When model is omitted the subagent runs on the same model as the calling agent.`;
+    }
+    this.description = description;
     this.log = log;
   }
 
@@ -202,6 +218,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         parentToolCallId: toolCallId,
         prompt: args.prompt,
         description: args.description,
+        modelAlias: args.model?.length ? args.model : undefined,
         runInBackground,
         signal: controller.signal,
       };
@@ -222,6 +239,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
           operation,
           agentId: resumeAgentId,
           subagentType: operation === 'spawn' ? requestedProfileName ?? 'coder' : undefined,
+          model: args.model,
           error,
         });
         throw error;

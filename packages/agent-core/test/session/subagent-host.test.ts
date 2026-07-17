@@ -1167,6 +1167,103 @@ describe('SessionSubagentHost', () => {
     expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
     expect(child.agent.config.modelAlias).not.toBe('stale-model-from-initial-spawn');
   });
+
+  it('runs a spawned subagent on the requested model override', async () => {
+    const { parent, child, host } = modelCatalogFixture();
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Implement the change',
+      description: 'Implement change',
+      modelAlias: 'fast-model',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    // The dispatch override wins over inheritance…
+    expect(child.agent.config.modelAlias).toBe('fast-model');
+    // …and the parent agent itself stays on its own model.
+    expect(parent.agent.config.modelAlias).toBe('parent-model');
+  });
+
+  it('inherits the parent agent current model when no override is given', async () => {
+    const { parent, child, host } = modelCatalogFixture();
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Implement the change',
+      description: 'Implement change',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    // The child follows the parent's CURRENT model — not the harness/CLI
+    // default it was constructed with ('mock-model').
+    expect(child.agent.config.modelAlias).toBe('parent-model');
+    expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
+    expect(child.agent.config.modelAlias).not.toBe('mock-model');
+  });
+
+  it('rejects an unknown model override naming the configured aliases', async () => {
+    const { session, host } = modelCatalogFixture();
+
+    await expect(
+      host.spawn({
+        profileName: 'coder',
+        parentToolCallId: 'call_agent',
+        prompt: 'Implement the change',
+        description: 'Implement change',
+        modelAlias: 'no-such-model',
+        runInBackground: false,
+        signal,
+      }),
+    ).rejects.toThrow(
+      'Unknown model alias "no-such-model". Available models: parent-model, fast-model',
+    );
+    // Validation fails the launch before a child agent is allocated.
+    expect(session.createAgent).not.toHaveBeenCalled();
+  });
+
+  it('runs a resumed subagent on the requested model override', async () => {
+    const parent = testAgent({ initialConfig: modelCatalogConfig() });
+    parent.configure();
+    parent.agent.config.update({ modelAlias: 'parent-model' });
+    parent.agent.permission.setMode('yolo');
+
+    const child = testAgent({ initialConfig: modelCatalogConfig() });
+    child.configure({ tools: ['Read'] });
+    child.agent.useProfile(
+      profile({ name: 'explore', tools: ['Read'], systemPrompt: 'explore prompt' }),
+    );
+    child.agent.context.appendUserMessage([{ type: 'text', text: 'Earlier context' }]);
+    child.mockNextResponse({ type: 'text', text: DETAILED_SUMMARY });
+
+    const session = fakeSession(parent.agent, child.agent, {
+      'agent-0': {
+        homedir: '/tmp/kimi-session/agents/agent-0',
+        type: 'sub',
+        parentAgentId: 'main',
+      },
+    });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.resume('agent-0', {
+      parentToolCallId: 'call_agent',
+      prompt: 'Continue from context',
+      description: 'Continue work',
+      modelAlias: 'fast-model',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(child.agent.config.modelAlias).toBe('fast-model');
+    expect(child.agent.config.modelAlias).not.toBe(parent.agent.config.modelAlias);
+  });
 });
 
 describe('Session resume permission parent chain', () => {
@@ -1572,6 +1669,42 @@ describe('Session.createAgent', () => {
     expect(sub.agent.mcp).toBe(session.mcp);
   });
 });
+
+const DETAILED_SUMMARY =
+  'Completed the delegated work end to end and verified the result, then reported a full and detailed technical summary so the parent agent can continue confidently without repeating any of the prior work or context. '.repeat(
+    2,
+  );
+
+/** A parent config with two model aliases, mirroring a real catalog. */
+function modelCatalogConfig() {
+  return {
+    providers: { kimi: { type: 'kimi' as const, apiKey: 'test-key' } },
+    models: {
+      'parent-model': { provider: 'kimi', model: 'parent-upstream', maxContextSize: 262144 },
+      'fast-model': { provider: 'kimi', model: 'fast-upstream', maxContextSize: 262144 },
+    },
+  };
+}
+
+/**
+ * A parent on a non-default model ('parent-model') with a two-alias catalog,
+ * plus a scripted child and host — the shared setup for the subagent
+ * model-selection tests.
+ */
+function modelCatalogFixture() {
+  const parent = testAgent({ initialConfig: modelCatalogConfig() });
+  parent.configure();
+  parent.agent.config.update({ modelAlias: 'parent-model' });
+
+  // The child shares the session config, so it knows the same catalog.
+  const child = testAgent({ initialConfig: modelCatalogConfig() });
+  child.configure();
+  child.mockNextResponse({ type: 'text', text: DETAILED_SUMMARY });
+
+  const session = fakeSession(parent.agent, child.agent);
+  const host = new SessionSubagentHost(session, 'main');
+  return { parent, child, session, host };
+}
 
 function fakeSession(
   parent: Agent,
