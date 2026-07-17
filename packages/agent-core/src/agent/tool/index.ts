@@ -758,6 +758,7 @@ export class ToolManager {
               allowBackground,
               log: this.agent.log,
               subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
+              models: Object.keys(this.agent.kimiConfig?.models ?? {}),
             },
           ),
         this.agent.subagentHost &&
